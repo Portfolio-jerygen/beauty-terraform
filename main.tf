@@ -1,101 +1,124 @@
-# Storage buckets removed - managed manually to prevent data loss
+locals {
+  raw_bucket_name = coalesce(var.raw_bucket_name, "${var.project_id}-beauty-raw")
 
-# IAM bindings for project members - Storage Admin access
-resource "google_project_iam_binding" "storage_admin" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/storage.admin"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+  common_labels = {
+    project     = "beauty-commerce"
+    environment = var.environment
+    managed_by  = "terraform"
+  }
+
+  dataset_ids = toset([
+    "bronze",
+    "silver",
+    "gold",
+    "metadata",
+  ])
 }
 
-# IAM bindings for project members - Cloud Run Admin access
-resource "google_project_iam_binding" "cloud_run_admin" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/run.admin"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+resource "google_storage_bucket" "raw_data" {
+  name                        = local.raw_bucket_name
+  project                     = var.project_id
+  location                    = var.region
+  force_destroy               = false
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  labels                      = local.common_labels
+
+  versioning {
+    enabled = true
+  }
+
+  depends_on = [google_project_service.required]
 }
 
-# IAM bindings for project members - Compute Admin access
-resource "google_project_iam_binding" "compute_admin" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/compute.admin"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+resource "google_bigquery_dataset" "layer" {
+  for_each = local.dataset_ids
+
+  project                    = var.project_id
+  dataset_id                 = each.value
+  friendly_name              = "Beauty ${title(each.value)}"
+  description                = "${title(each.value)} layer for the beauty commerce portfolio pipeline"
+  location                   = var.region
+  delete_contents_on_destroy = false
+  labels                     = local.common_labels
+
+  depends_on = [google_project_service.required]
 }
 
-# IAM bindings for project members - BigQuery Admin access
-resource "google_project_iam_binding" "bigquery_admin" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/bigquery.admin"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+resource "google_artifact_registry_repository" "crawlers" {
+  project       = var.project_id
+  location      = var.region
+  repository_id = "beauty-crawlers"
+  description   = "Container images for beauty commerce crawler jobs"
+  format        = "DOCKER"
+  labels        = local.common_labels
+
+  depends_on = [google_project_service.required]
 }
 
-# IAM bindings for project members - IAM Admin access
-resource "google_project_iam_binding" "iam_admin" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/resourcemanager.projectIamAdmin"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+resource "google_service_account" "crawler" {
+  project      = var.project_id
+  account_id   = "beauty-crawler"
+  display_name = "Beauty crawler Cloud Run jobs"
 }
 
-
-# IAM bindings for project members - Artifact Registry Admin access
-resource "google_project_iam_binding" "artifact_registry_admin" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/artifactregistry.admin"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+resource "google_service_account" "airflow" {
+  project      = var.project_id
+  account_id   = "beauty-airflow"
+  display_name = "Beauty Airflow orchestration"
 }
 
-# IAM bindings for project members - Service Usage Consumer access
-resource "google_project_iam_binding" "service_usage_consumer" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/serviceusage.serviceUsageConsumer"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+resource "google_service_account" "dashboard" {
+  project      = var.project_id
+  account_id   = "beauty-dashboard"
+  display_name = "Beauty dashboard read-only queries"
 }
 
-# IAM bindings for project members - Cloud Build Editor access
-resource "google_project_iam_binding" "cloud_build_editor" {
-  count   = length(var.project_members) > 0 ? 1 : 0
-  project = var.project_id
-  role    = "roles/cloudbuild.builds.editor"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+# The crawler only creates raw objects. It cannot read or delete existing data.
+resource "google_storage_bucket_iam_member" "crawler_object_creator" {
+  bucket = google_storage_bucket.raw_data.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.crawler.email}"
 }
 
-# IAM bindings for project members - Logging Viewer access (for Cloud Run job logs)
-resource "google_project_iam_binding" "logging_viewer" {
-  count   = length(var.project_members) > 0 ? 1 : 0
+# Airflow reads raw objects and submits BigQuery load/query jobs.
+resource "google_storage_bucket_iam_member" "airflow_object_viewer" {
+  bucket = google_storage_bucket.raw_data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.airflow.email}"
+}
+
+resource "google_project_iam_member" "airflow_bigquery_job_user" {
   project = var.project_id
-  role    = "roles/logging.viewer"
-  
-  members = [
-    for email in var.project_members : "user:${email}"
-  ]
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.airflow.email}"
+}
+
+resource "google_project_iam_member" "airflow_cloud_run_invoker" {
+  project = var.project_id
+  role    = "roles/run.invoker"
+  member  = "serviceAccount:${google_service_account.airflow.email}"
+}
+
+resource "google_bigquery_dataset_iam_member" "airflow_data_editor" {
+  for_each = google_bigquery_dataset.layer
+
+  project    = var.project_id
+  dataset_id = each.value.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.airflow.email}"
+}
+
+# The public dashboard can run queries and read only the curated Gold layer.
+resource "google_project_iam_member" "dashboard_bigquery_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}
+
+resource "google_bigquery_dataset_iam_member" "dashboard_gold_viewer" {
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.layer["gold"].dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.dashboard.email}"
 }

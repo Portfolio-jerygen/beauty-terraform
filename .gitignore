@@ -3,9 +3,13 @@
 terraform.tfstate*
 crash.log
 *.tfvars
+*.tfplan
+.terraform.tfstate.lock.info
 
 # GCP Credential
 credentials.json
+*-credentials.json
+service-account*.json
 
 # Pycharm
 .idea
