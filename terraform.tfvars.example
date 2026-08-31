@@ -1,0 +1,6 @@
+project_id  = "your-gcp-project-id"
+region      = "asia-northeast3"
+environment = "portfolio"
+
+# Set this only when the default bucket name is unavailable.
+# raw_bucket_name = "globally-unique-beauty-raw-bucket"
